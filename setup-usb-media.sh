@@ -75,14 +75,14 @@ sudo mkdir -p "$MOUNT_POINT"
 # Build fstab options by fs type
 case "$FSTYPE" in
     vfat|exfat)
-        FSTAB_OPTS="defaults,nofail,uid=${USER_UID},gid=${USER_GID},umask=022,noatime,x-systemd.device-timeout=5s"
+        FSTAB_OPTS="defaults,nofail,uid=${USER_UID},gid=${USER_GID},umask=022,noatime,x-systemd.device-timeout=5s,x-systemd.automount"
         ;;
     ext4|ext3|ext2|btrfs|xfs)
-        FSTAB_OPTS="defaults,nofail,noatime,x-systemd.device-timeout=5s"
+        FSTAB_OPTS="defaults,nofail,noatime,x-systemd.device-timeout=5s,x-systemd.automount"
         ;;
     ntfs|ntfs3)
         FSTYPE="ntfs3"
-        FSTAB_OPTS="defaults,nofail,uid=${USER_UID},gid=${USER_GID},umask=022,noatime,x-systemd.device-timeout=5s"
+        FSTAB_OPTS="defaults,nofail,uid=${USER_UID},gid=${USER_GID},umask=022,noatime,x-systemd.device-timeout=5s,x-systemd.automount"
         ;;
     *)
         die "Unsupported fs type: $FSTYPE"
