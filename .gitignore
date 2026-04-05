@@ -1,0 +1,27 @@
+# Track only the current version + firmware + install scaffolding.
+# Ignore older experiments, test sketches, and runtime artifacts.
+
+# Old Python versions / tests
+easyplay[0-5]*.py
+!easyplay55.py
+remote_main_*.py
+remote_c3_v[0-5].py
+
+# Old firmware experiments
+blink_test_v*/
+button_test_v*/
+
+# Runtime artifacts
+video_thumb_cache/
+easyplay_crash.log
+easyplay_config.json
+easyplay_progress.json
+
+# Python
+__pycache__/
+*.pyc
+.venv/
+venv/
+
+# OS
+.DS_Store

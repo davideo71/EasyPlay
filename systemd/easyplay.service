@@ -1,0 +1,21 @@
+[Unit]
+Description=EasyPlay accessible media player
+After=graphical.target bluetooth.service
+Wants=bluetooth.service
+
+[Service]
+Type=simple
+User=%USER%
+Group=%USER%
+WorkingDirectory=%REPO%
+Environment=HOME=%HOME%
+Environment=DISPLAY=:0
+Environment=XDG_RUNTIME_DIR=/run/user/1000
+ExecStart=/usr/bin/python3 %REPO%/easyplay55.py
+Restart=on-failure
+RestartSec=3
+StandardOutput=journal
+StandardError=journal
+
+[Install]
+WantedBy=graphical.target
