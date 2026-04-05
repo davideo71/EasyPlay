@@ -132,12 +132,17 @@ def parse_folder_name(name: str) -> ParsedTitle:
     return ParsedTitle(title=cleaned, year=year, season=season, raw=raw)
 
 
+def _is_real_file(p: Path) -> bool:
+    """Filter out macOS AppleDouble shadows, .DS_Store, and other dotfiles."""
+    return not (p.name.startswith(".") or p.name.startswith("._"))
+
+
 def folder_is_tv(subdir: Path) -> bool:
     """Detect TV series folder heuristically: multiple video files OR S01/Season token in name."""
     if SEASON_RE.search(subdir.name):
         return True
     videos = [f for f in subdir.iterdir()
-              if f.is_file() and f.suffix.lower() in VIDEO_EXTS]
+              if f.is_file() and _is_real_file(f) and f.suffix.lower() in VIDEO_EXTS]
     return len(videos) > 1
 
 
@@ -214,11 +219,22 @@ def pick_match(parsed: ParsedTitle, folder: Path, client: TMDBClient) -> dict | 
             return None
 
         if not results:
-            print("│  No matches.")
-        else:
-            print(f"│  {min(len(results), 9)} matches:")
+            other = "tv" if kind == "movie" else "movie"
+            print(f"│  No matches as {kind}. Trying {other}…")
+            try:
+                alt = client.search(query, year, other)
+            except requests.HTTPError:
+                alt = []
+            if alt:
+                kind = other
+                results = alt
+
+        if results:
+            print(f"│  {min(len(results), 9)} matches as {kind}:")
             for i, m in enumerate(results[:9], start=1):
                 print(fmt_match(i, m, kind))
+        else:
+            print("│  No matches either way — use 'r' to retype the query.")
 
         print("└─ [1-9] pick | s skip | r retry different query | t toggle movie/tv | o open top in browser | q quit")
         choice = input("   > ").strip().lower()
