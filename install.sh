@@ -13,7 +13,9 @@
 #   6. Shrinks the rpi-swap file to 512 MiB (Pi OS defaults to 2 GiB).
 #   7. Optionally disables the internal Pi Bluetooth so a USB BT dongle
 #      becomes hci0, via --external-bt.  Requires a reboot.
-#   8. Cleans the apt cache.
+#   8. Disables NetworkManager wifi power-save (Pi 5 brcmfmac drops
+#      associations on marginal signal when power save is on).
+#   9. Cleans the apt cache.
 #
 # For media storage on a USB drive, run `./setup-usb-media.sh` after this.
 #
@@ -173,7 +175,25 @@ if [[ ! -e "$MEDIA_DIR" ]]; then
     sudo -u "$USER_NAME" mkdir -p "$MEDIA_DIR"
 fi
 
-# ── 9. apt cache cleanup ─────────────────────────────────────────────────────
+# ── 9. Disable NetworkManager wifi power save ────────────────────────────────
+# Pi 5's brcmfmac chip with power save enabled drops associations on marginal
+# signal (weak RSSI + WPA handshake timeout).  Apply globally so every wifi
+# profile inherits the setting, current and future.
+NM_CONF_D="/etc/NetworkManager/conf.d"
+if [[ -d "$NM_CONF_D" ]]; then
+    NM_POWERSAVE="$NM_CONF_D/10-wifi-powersave-off.conf"
+    if [[ ! -f "$NM_POWERSAVE" ]]; then
+        log "Disabling NetworkManager wifi power save…"
+        printf '[connection]\nwifi.powersave = 2\n' | sudo tee "$NM_POWERSAVE" >/dev/null
+        sudo systemctl reload NetworkManager 2>/dev/null || \
+            sudo systemctl restart NetworkManager 2>/dev/null || \
+            warn "Couldn't reload NetworkManager; it'll pick up on next boot."
+    else
+        log "Wifi power-save drop-in already present."
+    fi
+fi
+
+# ── 10. apt cache cleanup ────────────────────────────────────────────────────
 log "Cleaning apt cache…"
 sudo apt-get clean
 sudo apt-get autoremove -y >/dev/null 2>&1 || true
