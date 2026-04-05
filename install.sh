@@ -32,9 +32,10 @@ die()  { printf '\033[1;31m[easyplay]\033[0m %s\n' "$*" >&2; exit 1; }
 if [[ -f /etc/os-release ]]; then
     . /etc/os-release
     log "Detected: ${PRETTY_NAME:-unknown}"
-    if [[ "${VERSION_CODENAME:-}" != "bookworm" ]]; then
-        warn "Tested on Bookworm only; continuing anyway."
-    fi
+    case "${VERSION_CODENAME:-}" in
+        bookworm|trixie) ;;
+        *) warn "Tested on Bookworm/Trixie; continuing anyway." ;;
+    esac
 fi
 
 # ── 1. apt packages ──────────────────────────────────────────────────────────
