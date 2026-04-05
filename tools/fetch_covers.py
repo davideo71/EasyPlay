@@ -21,9 +21,13 @@ Setup
 
 Usage
 -----
+    # With a path:
     python3 tools/fetch_covers.py /Volumes/BIGF/codevideos
     python3 tools/fetch_covers.py /Volumes/BIGF/codevideos --only "Jojo*"
     python3 tools/fetch_covers.py /Volumes/BIGF/codevideos --skip-existing
+
+    # Without a path — a native folder picker pops up:
+    python3 tools/fetch_covers.py
 
 Keys in the picker:
     1-9   pick that match
@@ -284,13 +288,47 @@ def load_token() -> str:
 
 # ── main ─────────────────────────────────────────────────────────────────────
 
+def pick_library_folder() -> Path | None:
+    """Open a native folder-picker dialog. Returns selected Path or None if cancelled."""
+    try:
+        import tkinter as tk
+        from tkinter import filedialog
+    except ImportError:
+        sys.exit("tkinter not available; pass the library path as a command-line argument.")
+    root = tk.Tk()
+    root.withdraw()
+    # Nudge default starting location toward likely library spots on macOS.
+    initial = None
+    for candidate in ("/Volumes/BIGF/codevideos",
+                      str(Path.home() / "Desktop" / "codevideos"),
+                      "/Volumes"):
+        if Path(candidate).is_dir():
+            initial = candidate
+            break
+    selected = filedialog.askdirectory(
+        title="Pick the codevideos library folder",
+        initialdir=initial,
+        mustexist=True,
+    )
+    root.destroy()
+    return Path(selected) if selected else None
+
+
 def main():
     ap = argparse.ArgumentParser(description="Interactive TMDB cover fetcher for EasyPlay.")
-    ap.add_argument("library", type=Path, help="Path to the codevideos folder")
+    ap.add_argument("library", type=Path, nargs="?", default=None,
+                    help="Path to the codevideos folder (if omitted, a folder picker pops up)")
     ap.add_argument("--only", default=None, help="Only process folders matching this glob (e.g. 'Jojo*')")
     ap.add_argument("--skip-existing", action="store_true",
                     help="Skip folders that already have a cover.jpg")
     args = ap.parse_args()
+
+    if args.library is None:
+        picked = pick_library_folder()
+        if picked is None:
+            sys.exit("No folder selected.")
+        args.library = picked
+        print(f"Selected library: {args.library}")
 
     if not args.library.is_dir():
         sys.exit(f"Not a directory: {args.library}")
