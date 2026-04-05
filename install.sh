@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
 #
-# EasyPlay installer for Raspberry Pi OS Bookworm (64-bit).
+# EasyPlay installer for Raspberry Pi OS Bookworm/Trixie (64-bit).
 #
 # What it does:
 #   1. Installs apt packages (pygame, vlc, mpv, cec-utils, bluez, unclutter, ...)
@@ -9,15 +9,34 @@
 #   3. Adds the user to the `bluetooth` group.
 #   4. Drops a sudoers.d rule so the app can run `hciconfig hci0 {reset,up,down}`
 #      without a password (EasyPlay calls this on BLE disconnect).
-#   5. Installs a systemd user service `easyplay.service`, left DISABLED by default.
+#   5. Installs a systemd service `easyplay.service`, left DISABLED by default.
+#   6. Shrinks the rpi-swap file to 512 MiB (Pi OS defaults to 2 GiB).
+#   7. Optionally disables the internal Pi Bluetooth so a USB BT dongle
+#      becomes hci0, via --external-bt.  Requires a reboot.
+#   8. Cleans the apt cache.
+#
+# For media storage on a USB drive, run `./setup-usb-media.sh` after this.
 #
 # Run from inside the cloned repo:
 #     cd ~/Desktop/EasyPlay
-#     ./install.sh
+#     ./install.sh                  # normal install
+#     ./install.sh --external-bt    # also disable internal BT (reboot needed)
 #
 # Re-running is safe — every step is idempotent.
 
 set -euo pipefail
+
+EXTERNAL_BT=0
+for arg in "$@"; do
+    case "$arg" in
+        --external-bt) EXTERNAL_BT=1 ;;
+        -h|--help)
+            sed -n '2,22p' "$0" | sed 's/^# \{0,1\}//'
+            exit 0
+            ;;
+        *) echo "Unknown option: $arg" >&2; exit 1 ;;
+    esac
+done
 
 REPO_DIR="$(cd "$(dirname "$0")" && pwd)"
 USER_NAME="${SUDO_USER:-$USER}"
@@ -108,17 +127,65 @@ else
     warn "No systemd/easyplay.service found in repo — skipping."
 fi
 
-# ── 6. Media folder ──────────────────────────────────────────────────────────
+# ── 6. Shrink rpi-swap file from 2 GiB to 512 MiB ────────────────────────────
+# Pi OS defaults to ~2 GiB swap. EasyPlay (pygame + VLC) doesn't need that much.
+# Drop-in lives in /etc/rpi/swap.conf.d/, resize runs immediately.
+if [[ -d /etc/rpi ]]; then
+    SWAP_DROPIN="/etc/rpi/swap.conf.d/10-easyplay.conf"
+    if [[ ! -f "$SWAP_DROPIN" ]]; then
+        log "Shrinking rpi-swap file to 512 MiB…"
+        sudo mkdir -p /etc/rpi/swap.conf.d
+        printf '[File]\nFixedSizeMiB=512\n' | sudo tee "$SWAP_DROPIN" >/dev/null
+        if command -v /usr/lib/rpi-swap/bin/rpi-resize-swap-file >/dev/null 2>&1; then
+            sudo /usr/lib/rpi-swap/bin/rpi-resize-swap-file 2>&1 | tail -3 || warn "swap resize had issues, check manually"
+        fi
+    else
+        log "Swap drop-in already present."
+    fi
+fi
+
+# ── 7. Optional: disable internal Bluetooth so USB dongle is hci0 ────────────
+if [[ "$EXTERNAL_BT" -eq 1 ]]; then
+    CONFIG_TXT="/boot/firmware/config.txt"
+    [[ -f "$CONFIG_TXT" ]] || CONFIG_TXT="/boot/config.txt"
+    if [[ -f "$CONFIG_TXT" ]]; then
+        if ! grep -q "^dtoverlay=disable-bt" "$CONFIG_TXT"; then
+            log "Disabling internal Bluetooth (dtoverlay=disable-bt in $CONFIG_TXT)…"
+            sudo cp "$CONFIG_TXT" "${CONFIG_TXT}.bak-$(date +%Y%m%d-%H%M)"
+            {
+                echo ""
+                echo "# EasyPlay: disable internal Bluetooth so USB dongle becomes hci0"
+                echo "dtoverlay=disable-bt"
+            } | sudo tee -a "$CONFIG_TXT" >/dev/null
+            warn "Reboot required for internal BT to be disabled."
+        else
+            log "Internal BT already disabled in $CONFIG_TXT."
+        fi
+    else
+        warn "Could not find config.txt; skipping --external-bt."
+    fi
+fi
+
+# ── 8. Media folder ──────────────────────────────────────────────────────────
 MEDIA_DIR="$USER_HOME/Desktop/codevideos"
-if [[ ! -d "$MEDIA_DIR" ]]; then
+if [[ ! -e "$MEDIA_DIR" ]]; then
     log "Creating media folder at $MEDIA_DIR"
     sudo -u "$USER_NAME" mkdir -p "$MEDIA_DIR"
 fi
+
+# ── 9. apt cache cleanup ─────────────────────────────────────────────────────
+log "Cleaning apt cache…"
+sudo apt-get clean
+sudo apt-get autoremove -y >/dev/null 2>&1 || true
 
 log "Done."
 echo
 echo "Next steps:"
 echo "  1. Log out and back in (or reboot) so the bluetooth group takes effect."
-echo "  2. Drop videos into ~/Desktop/codevideos/"
+if [[ "$EXTERNAL_BT" -eq 1 ]]; then
+    echo "     (Reboot is required to activate the USB BT dongle as hci0.)"
+fi
+echo "  2. For media on a USB drive:  ./setup-usb-media.sh"
+echo "     Otherwise drop videos into ~/Desktop/codevideos/"
 echo "  3. Test run:    python3 $REPO_DIR/easyplay55.py"
 echo "  4. When happy:  sudo systemctl enable --now easyplay.service"
