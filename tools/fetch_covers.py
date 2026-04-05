@@ -58,6 +58,13 @@ POSTER_SIZE = "w780"   # Good balance of quality and size
 VIDEO_EXTS = {".mp4", ".mkv", ".avi", ".mov", ".m4v", ".webm", ".ts", ".wmv"}
 IMG_EXTS = {".jpg", ".jpeg", ".png"}
 
+# Folders that aren't media and should never be processed.
+EXCLUDE_FOLDERS = {
+    "System Volume Information", "$RECYCLE.BIN", "RECYCLER",
+    "lost+found", ".Trashes", ".fseventsd", ".Spotlight-V100",
+    "Subs", "Extras", "Sample", "Samples",
+}
+
 
 # ── Folder-name parsing ──────────────────────────────────────────────────────
 
@@ -77,9 +84,12 @@ NOISE_PATTERNS = [
     r"\bHDRip\b", r"\bHDTV\b",
     r"\bHEVC\b", r"\bx26[45]\b", r"\bh\.?26[45]\b",
     r"\bAAC\d*(?:\.\d)?\b", r"\bAC3\b", r"\bDTS\b",
-    r"\bDDP?\d(?:\.\d)?\b",     # DDP5.1, DD5.1, DDP5
-    r"\bDDP?\b",                # DDP / DD standalone
-    r"\b5[\.\s]?1\b",           # "5.1" or "5 1" audio channel spec
+    # Audio channel specs as whole chunks (longest first so alternation
+    # doesn't grab a shorter prefix and leave an orphan digit behind)
+    r"\bDDP?[\s\.]?\d[\s\.]\d\b",   # DD 5 1 / DDP5.1 / DD.5.1
+    r"\bDDP?[\s\.]?\d\b",           # DDP5 / DD.5 / DDP 5
+    r"\bDDP?\b",                    # DDP / DD standalone
+    r"\b5[\.\s]?1\b",               # plain 5.1 / 5 1
     r"\b7[\.\s]?1\b",
     r"\b2[\.\s]?0\b",
     r"\bYTS\.?\w*\b", r"\bYIFY\b", r"\bRARBG\b", r"\bGalaxyRG\b",
@@ -88,8 +98,14 @@ NOISE_PATTERNS = [
     r"\bREMASTERED\b", r"\bEXTENDED\b", r"\bUNRATED\b",
     r"\bDIRECTORS?[\s\.]?CUT\b",
     r"\bComplete\b",
-    r"\bNF\b", r"\bAMZN\b", r"\bMAX\b", r"\bSUCCESSFULCRAB\b",
+    r"\bNF\b", r"\bAMZN\b", r"\bSUCCESSFULCRAB\b",
     r"\bDVDScr\b", r"\bDVDRip\b", r"\bREPACK\b",
+    r"\bHDCAM\b",   # full-word only; plain CAM/TS/TC/MAX are too ambiguous
+    r"\bPROPER\b", r"\bCOMPLETE\b",
+    r"\bION265\b", r"\beztv(?:\.re)?\b", r"\bGalaxyTV\b", r"\bUKB\b",
+    r"\bHMAX\b",
+    r"\bWEB\b",     # standalone WEB separator (e.g. "S02E04.WEB.H264")
+    r"\bH264\b", r"\bH265\b",
     r"-\w+$",                   # trailing -GROUP tag
 ]
 NOISE_RE = re.compile("|".join(NOISE_PATTERNS), re.I)
@@ -203,8 +219,13 @@ def tmdb_page_url(m: dict, kind: str) -> str:
     return f"https://www.themoviedb.org/{kind}/{m['id']}"
 
 
-def pick_match(parsed: ParsedTitle, folder: Path, client: TMDBClient) -> dict | None:
-    """Prompt loop for a single folder. Returns chosen TMDB result or None to skip."""
+def pick_match(parsed: ParsedTitle, folder: Path, client: TMDBClient,
+               auto: bool = False) -> dict | None:
+    """Prompt loop for a single folder. Returns chosen TMDB result or None to skip.
+
+    If auto=True, never prompts: auto-picks the first result with a poster,
+    skips the folder otherwise.
+    """
     kind = "tv" if folder_is_tv(folder) else "movie"
     query = parsed.title
     year = parsed.year
@@ -234,7 +255,16 @@ def pick_match(parsed: ParsedTitle, folder: Path, client: TMDBClient) -> dict | 
             for i, m in enumerate(results[:9], start=1):
                 print(fmt_match(i, m, kind))
         else:
-            print("│  No matches either way — use 'r' to retype the query.")
+            print("│  No matches either way.")
+
+        # Auto mode: pick the first result with a poster, otherwise skip.
+        if auto:
+            for m in results:
+                if m.get("poster_path"):
+                    print("│  (auto) picking match 1")
+                    return m
+            print("│  (auto) no usable match, skipping")
+            return None
 
         print("└─ [1-9] pick | s skip | r retry different query | t toggle movie/tv | o open top in browser | q quit")
         choice = input("   > ").strip().lower()
@@ -337,6 +367,10 @@ def main():
     ap.add_argument("--only", default=None, help="Only process folders matching this glob (e.g. 'Jojo*')")
     ap.add_argument("--skip-existing", action="store_true",
                     help="Skip folders that already have a cover.jpg")
+    ap.add_argument("--auto", action="store_true",
+                    help="Non-interactive: auto-pick the top TMDB match per folder, "
+                         "skip folders with no match. Safe because original covers "
+                         "are backed up as cover.jpg.bak.")
     args = ap.parse_args()
 
     if args.library is None:
@@ -352,7 +386,10 @@ def main():
     token = load_token()
     client = TMDBClient(token)
 
-    folders = sorted(p for p in args.library.iterdir() if p.is_dir() and not p.name.startswith("."))
+    folders = sorted(p for p in args.library.iterdir()
+                     if p.is_dir()
+                     and not p.name.startswith(".")
+                     and p.name not in EXCLUDE_FOLDERS)
     if args.only:
         import fnmatch
         folders = [p for p in folders if fnmatch.fnmatch(p.name, args.only)]
@@ -360,28 +397,35 @@ def main():
         sys.exit("No folders to process.")
 
     print(f"{len(folders)} folders to process in {args.library}")
+    if args.auto:
+        print("(--auto: picking top match per folder, no prompts)")
 
+    written = skipped = failed = 0
     for folder in folders:
         if args.skip_existing and (folder / "cover.jpg").exists() and not (folder / "cover.jpg.bak").exists():
-            # Only skip if there's a cover AND no prior fetch (i.e. not one we wrote)
             print(f"\n─ {folder.name}: has cover.jpg, skipping")
+            skipped += 1
             continue
 
         parsed = parse_folder_name(folder.name)
         if not parsed.title:
             print(f"\n─ {folder.name}: couldn't parse title, skipping")
+            skipped += 1
             continue
 
-        match = pick_match(parsed, folder, client)
+        match = pick_match(parsed, folder, client, auto=args.auto)
         if match is None:
+            skipped += 1
             continue
         try:
             dest = save_cover(folder, client, match)
             print(f"   ✓ wrote {dest}")
+            written += 1
         except Exception as e:
             print(f"   ✗ download failed: {e}")
+            failed += 1
 
-    print("\nAll done.")
+    print(f"\nDone. written={written} skipped={skipped} failed={failed}")
 
 
 if __name__ == "__main__":
