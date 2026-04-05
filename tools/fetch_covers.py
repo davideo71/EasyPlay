@@ -1,0 +1,334 @@
+#!/usr/bin/env python3
+"""
+fetch_covers.py — interactive TMDB poster fetcher for EasyPlay.
+
+For each media folder under the target directory, parses title+year from
+the folder name, queries The Movie Database (TMDB), shows the top matches,
+lets you pick one, and downloads the poster to <folder>/cover.jpg.
+
+Existing cover.jpg is renamed to cover.jpg.bak on first fetch so originals
+are always recoverable.
+
+Setup
+-----
+1. Create a free TMDB account at https://www.themoviedb.org/signup
+2. Go to Settings -> API and request an API key (instant approval).
+3. Grab the "API Read Access Token" (a long v4 bearer token).
+4. Either:
+     export TMDB_TOKEN='eyJhbGciOiJIUzI1NiJ9.xxxxxx...'
+   or put it in ~/.config/easyplay/tmdb_token on a single line.
+5. pip install requests pillow
+
+Usage
+-----
+    python3 tools/fetch_covers.py /Volumes/BIGF/codevideos
+    python3 tools/fetch_covers.py /Volumes/BIGF/codevideos --only "Jojo*"
+    python3 tools/fetch_covers.py /Volumes/BIGF/codevideos --skip-existing
+
+Keys in the picker:
+    1-9   pick that match
+    s     skip this folder
+    q     quit
+    o     open the TMDB page for the top match in browser (verify)
+    r     retry with a different query string (you'll be prompted)
+"""
+
+from __future__ import annotations
+
+import argparse
+import os
+import re
+import shutil
+import sys
+import webbrowser
+from dataclasses import dataclass
+from pathlib import Path
+
+# requests is imported lazily so the parser functions can be used/tested
+# without the dependency installed. See TMDBClient.__init__.
+requests = None  # type: ignore
+
+TMDB_BASE = "https://api.themoviedb.org/3"
+TMDB_IMG_BASE = "https://image.tmdb.org/t/p"
+POSTER_SIZE = "w780"   # Good balance of quality and size
+VIDEO_EXTS = {".mp4", ".mkv", ".avi", ".mov", ".m4v", ".webm", ".ts", ".wmv"}
+IMG_EXTS = {".jpg", ".jpeg", ".png"}
+
+
+# ── Folder-name parsing ──────────────────────────────────────────────────────
+
+YEAR_RE = re.compile(r"[\(\[\. ](19\d{2}|20\d{2})[\)\]\. ]")
+SEASON_RE = re.compile(r"\bS(?:eason)?\.?\s*(\d{1,2})(?:E\d{1,3})?\b", re.I)
+EPISODE_RE = re.compile(r"\bS\d{1,2}E\d{1,3}\b", re.I)
+
+NOISE_PATTERNS = [
+    r"\[[^\]]*\]",              # [YTS.MX], [BluRay], etc.
+    r"\([^)]*\)",               # (2019), (BluRay)
+    r"\b\d{3,4}p\b",            # 720p, 1080p, 2160p
+    r"\b\d+[\._ ]?bit\b",       # 10bit, 10.bit, 10 bit
+    r"\b\d+(?:\.\d+)?\s?MB\b",  # 900MB, 1.5GB
+    r"\b\d+(?:\.\d+)?\s?GB\b",
+    r"\bWEB[\- \.]?RIP\b", r"\bWEB[\- \.]?DL\b", r"\bBRRip\b",
+    r"\bBluRay\b", r"\bBlu[\- ]Ray\b",
+    r"\bHDRip\b", r"\bHDTV\b",
+    r"\bHEVC\b", r"\bx26[45]\b", r"\bh\.?26[45]\b",
+    r"\bAAC\d*(?:\.\d)?\b", r"\bAC3\b", r"\bDTS\b",
+    r"\bDDP?\d(?:\.\d)?\b",     # DDP5.1, DD5.1, DDP5
+    r"\bDDP?\b",                # DDP / DD standalone
+    r"\b5[\.\s]?1\b",           # "5.1" or "5 1" audio channel spec
+    r"\b7[\.\s]?1\b",
+    r"\b2[\.\s]?0\b",
+    r"\bYTS\.?\w*\b", r"\bYIFY\b", r"\bRARBG\b", r"\bGalaxyRG\b",
+    r"\bEZTVx?\b", r"\bNeoNoir\b", r"\bFENiX\b", r"\bMeGusta\b",
+    r"\bi_c\b", r"\bTGx\b", r"\bBONE\b",
+    r"\bREMASTERED\b", r"\bEXTENDED\b", r"\bUNRATED\b",
+    r"\bDIRECTORS?[\s\.]?CUT\b",
+    r"\bComplete\b",
+    r"\bNF\b", r"\bAMZN\b", r"\bMAX\b", r"\bSUCCESSFULCRAB\b",
+    r"\bDVDScr\b", r"\bDVDRip\b", r"\bREPACK\b",
+    r"-\w+$",                   # trailing -GROUP tag
+]
+NOISE_RE = re.compile("|".join(NOISE_PATTERNS), re.I)
+
+
+@dataclass
+class ParsedTitle:
+    title: str
+    year: int | None
+    season: int | None   # None = movie, int = TV season N
+    raw: str
+
+    @property
+    def is_tv(self) -> bool:
+        return self.season is not None
+
+
+def parse_folder_name(name: str) -> ParsedTitle:
+    raw = name
+    year_match = YEAR_RE.search(" " + name + " ")
+    year = int(year_match.group(1)) if year_match else None
+
+    season_match = SEASON_RE.search(name)
+    season = int(season_match.group(1)) if season_match else None
+
+    # Normalize separators first so \b-anchored noise patterns match
+    # consistently regardless of whether the name uses dots or spaces.
+    cleaned = re.sub(r"[._]+", " ", name)
+    # Strip everything noisy
+    cleaned = NOISE_RE.sub(" ", cleaned)
+    # Remove season/episode tokens
+    cleaned = EPISODE_RE.sub(" ", cleaned)
+    cleaned = SEASON_RE.sub(" ", cleaned)
+    # Strip the 4-digit year (anywhere, not just in brackets)
+    if year:
+        cleaned = re.sub(rf"\b{year}\b", " ", cleaned)
+    # Collapse whitespace
+    cleaned = re.sub(r"\s+", " ", cleaned).strip(" -")
+
+    return ParsedTitle(title=cleaned, year=year, season=season, raw=raw)
+
+
+def folder_is_tv(subdir: Path) -> bool:
+    """Detect TV series folder heuristically: multiple video files OR S01/Season token in name."""
+    if SEASON_RE.search(subdir.name):
+        return True
+    videos = [f for f in subdir.iterdir()
+              if f.is_file() and f.suffix.lower() in VIDEO_EXTS]
+    return len(videos) > 1
+
+
+# ── TMDB API ─────────────────────────────────────────────────────────────────
+
+class TMDBClient:
+    def __init__(self, token: str):
+        global requests
+        if requests is None:
+            try:
+                import requests as _requests
+                requests = _requests
+            except ImportError:
+                sys.exit("Missing dependency: pip install requests")
+        self.session = requests.Session()
+        self.session.headers["Authorization"] = f"Bearer {token}"
+        self.session.headers["Accept"] = "application/json"
+
+    def search(self, query: str, year: int | None, kind: str) -> list[dict]:
+        """kind: 'movie' or 'tv'. Returns raw result list."""
+        endpoint = f"{TMDB_BASE}/search/{kind}"
+        params = {"query": query, "include_adult": "false"}
+        if year and kind == "movie":
+            params["year"] = year
+        if year and kind == "tv":
+            params["first_air_date_year"] = year
+        r = self.session.get(endpoint, params=params, timeout=10)
+        r.raise_for_status()
+        return r.json().get("results", [])
+
+    def download_poster(self, poster_path: str, dest: Path) -> None:
+        url = f"{TMDB_IMG_BASE}/{POSTER_SIZE}{poster_path}"
+        with self.session.get(url, stream=True, timeout=30) as r:
+            r.raise_for_status()
+            with open(dest, "wb") as f:
+                for chunk in r.iter_content(chunk_size=65536):
+                    f.write(chunk)
+
+
+# ── UI ───────────────────────────────────────────────────────────────────────
+
+def fmt_match(i: int, m: dict, kind: str) -> str:
+    if kind == "movie":
+        title = m.get("title") or m.get("original_title") or "?"
+        date = m.get("release_date") or ""
+    else:
+        title = m.get("name") or m.get("original_name") or "?"
+        date = m.get("first_air_date") or ""
+    year = (date or "????")[:4]
+    overview = (m.get("overview") or "").strip().replace("\n", " ")
+    if len(overview) > 110:
+        overview = overview[:107] + "…"
+    poster = "✓" if m.get("poster_path") else "✗"
+    return f"  {i}. [{year}] {title}  (poster {poster})\n     {overview}"
+
+
+def tmdb_page_url(m: dict, kind: str) -> str:
+    return f"https://www.themoviedb.org/{kind}/{m['id']}"
+
+
+def pick_match(parsed: ParsedTitle, folder: Path, client: TMDBClient) -> dict | None:
+    """Prompt loop for a single folder. Returns chosen TMDB result or None to skip."""
+    kind = "tv" if folder_is_tv(folder) else "movie"
+    query = parsed.title
+    year = parsed.year
+
+    while True:
+        print(f"\n┌─ {folder.name}")
+        print(f"│  parsed: title='{query}' year={year} kind={kind}")
+        try:
+            results = client.search(query, year, kind)
+        except requests.HTTPError as e:
+            print(f"│  TMDB error: {e}")
+            return None
+
+        if not results:
+            print("│  No matches.")
+        else:
+            print(f"│  {min(len(results), 9)} matches:")
+            for i, m in enumerate(results[:9], start=1):
+                print(fmt_match(i, m, kind))
+
+        print("└─ [1-9] pick | s skip | r retry different query | t toggle movie/tv | o open top in browser | q quit")
+        choice = input("   > ").strip().lower()
+
+        if not choice:
+            continue
+        if choice == "q":
+            print("Quitting.")
+            sys.exit(0)
+        if choice == "s":
+            return None
+        if choice == "t":
+            kind = "tv" if kind == "movie" else "movie"
+            continue
+        if choice == "o" and results:
+            webbrowser.open(tmdb_page_url(results[0], kind))
+            continue
+        if choice == "r":
+            new_q = input("   new query> ").strip()
+            if new_q:
+                query = new_q
+            new_y = input(f"   year (blank to keep {year})> ").strip()
+            if new_y:
+                year = int(new_y) if new_y.isdigit() else None
+            continue
+        if choice.isdigit():
+            n = int(choice)
+            if 1 <= n <= len(results[:9]):
+                chosen = results[n - 1]
+                if not chosen.get("poster_path"):
+                    print("   That match has no poster on TMDB. Pick another or retry.")
+                    continue
+                return chosen
+        print("   ?")
+
+
+def save_cover(folder: Path, client: TMDBClient, match: dict) -> Path:
+    cover = folder / "cover.jpg"
+    if cover.exists():
+        bak = folder / "cover.jpg.bak"
+        if not bak.exists():
+            shutil.move(str(cover), str(bak))
+            print(f"   backed up existing cover -> {bak.name}")
+        else:
+            cover.unlink()
+    client.download_poster(match["poster_path"], cover)
+    return cover
+
+
+# ── Token loading ────────────────────────────────────────────────────────────
+
+def load_token() -> str:
+    tok = os.environ.get("TMDB_TOKEN")
+    if tok:
+        return tok.strip()
+    cfg = Path.home() / ".config" / "easyplay" / "tmdb_token"
+    if cfg.exists():
+        return cfg.read_text().strip()
+    sys.exit(
+        "No TMDB token found.\n"
+        "  Get one at https://www.themoviedb.org/settings/api (Read Access Token),\n"
+        "  then:  export TMDB_TOKEN='eyJ...'\n"
+        "  or:    mkdir -p ~/.config/easyplay && "
+        "echo 'eyJ...' > ~/.config/easyplay/tmdb_token"
+    )
+
+
+# ── main ─────────────────────────────────────────────────────────────────────
+
+def main():
+    ap = argparse.ArgumentParser(description="Interactive TMDB cover fetcher for EasyPlay.")
+    ap.add_argument("library", type=Path, help="Path to the codevideos folder")
+    ap.add_argument("--only", default=None, help="Only process folders matching this glob (e.g. 'Jojo*')")
+    ap.add_argument("--skip-existing", action="store_true",
+                    help="Skip folders that already have a cover.jpg")
+    args = ap.parse_args()
+
+    if not args.library.is_dir():
+        sys.exit(f"Not a directory: {args.library}")
+
+    token = load_token()
+    client = TMDBClient(token)
+
+    folders = sorted(p for p in args.library.iterdir() if p.is_dir() and not p.name.startswith("."))
+    if args.only:
+        import fnmatch
+        folders = [p for p in folders if fnmatch.fnmatch(p.name, args.only)]
+    if not folders:
+        sys.exit("No folders to process.")
+
+    print(f"{len(folders)} folders to process in {args.library}")
+
+    for folder in folders:
+        if args.skip_existing and (folder / "cover.jpg").exists() and not (folder / "cover.jpg.bak").exists():
+            # Only skip if there's a cover AND no prior fetch (i.e. not one we wrote)
+            print(f"\n─ {folder.name}: has cover.jpg, skipping")
+            continue
+
+        parsed = parse_folder_name(folder.name)
+        if not parsed.title:
+            print(f"\n─ {folder.name}: couldn't parse title, skipping")
+            continue
+
+        match = pick_match(parsed, folder, client)
+        if match is None:
+            continue
+        try:
+            dest = save_cover(folder, client, match)
+            print(f"   ✓ wrote {dest}")
+        except Exception as e:
+            print(f"   ✗ download failed: {e}")
+
+    print("\nAll done.")
+
+
+if __name__ == "__main__":
+    main()

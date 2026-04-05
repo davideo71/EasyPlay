@@ -16,6 +16,7 @@ Accessible media player for Raspberry Pi 5, built for stroke recovery.
 | `install.sh`             | Fresh-Pi setup script (Bookworm/Trixie 64-bit)|
 | `setup-usb-media.sh`     | Optional: point media folder at a USB drive  |
 | `systemd/easyplay.service` | systemd unit installed by `install.sh`     |
+| `tools/fetch_covers.py`  | Interactive TMDB poster fetcher (runs on Mac)|
 
 ## Fresh Pi install
 
@@ -56,6 +57,26 @@ When it works, enable autostart:
 ```bash
 sudo systemctl enable --now easyplay.service
 ```
+
+## Fetching movie posters
+
+Each media folder needs a `cover.jpg` (or `poster.jpg` / `folder.jpg`) for
+the carousel. The helper tool queries TMDB, shows you the top matches, and
+downloads whichever poster you pick.
+
+```bash
+# one-time setup: get a free TMDB read access token at
+# https://www.themoviedb.org/settings/api
+export TMDB_TOKEN='eyJhbGciOiJIUzI1NiJ9...'
+pip install requests
+
+# interactive run
+python3 tools/fetch_covers.py /Volumes/BIGF/codevideos
+```
+
+Existing cover files are backed up to `cover.jpg.bak` on first fetch so
+originals are always recoverable. `--skip-existing` skips folders that
+already have a `cover.jpg`, `--only 'Jojo*'` processes a single folder.
 
 ## BLE protocol
 

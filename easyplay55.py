@@ -417,14 +417,33 @@ class MediaItem:
     name: str; cover_path: Path | None; video_path: Path | None
     all_videos: list[Path]; is_series: bool = False
 
+def _pick_cover(subdir):
+    """Deterministically pick a cover image from a media folder.
+
+    Preference order:
+      1. cover.jpg / cover.jpeg / cover.png
+      2. poster.jpg / poster.jpeg / poster.png
+      3. folder.jpg / folder.jpeg / folder.png (Kodi/Plex convention)
+      4. Any other image, picked in sorted filename order (stable)
+    """
+    images = [f for f in subdir.iterdir()
+              if f.is_file() and not _is_hidden(f)
+              and f.suffix.lower() in COVER_IMAGE_EXTS]
+    if not images:
+        return None
+    for preferred in ("cover", "poster", "folder"):
+        for f in images:
+            if f.stem.lower() == preferred:
+                return f
+    return sorted(images, key=lambda f: f.name.lower())[0]
+
 def scan_media_library(folder=None):
     root = folder or get_media_folder(); items = []
     if not root.is_dir(): return items
     for subdir in sorted(root.iterdir()):
         if not subdir.is_dir() or _is_hidden(subdir): continue
         name = clean_media_name(subdir.name)
-        cover = next((f for f in subdir.iterdir() if f.is_file() and not _is_hidden(f)
-                      and f.suffix.lower() in COVER_IMAGE_EXTS), None)
+        cover = _pick_cover(subdir)
         videos = find_videos_in_folder(subdir)
         if not videos and not cover: continue
         items.append(MediaItem(name=name, cover_path=cover, video_path=videos[0] if videos else None,
