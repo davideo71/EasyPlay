@@ -98,10 +98,12 @@ NOISE_PATTERNS = [
     r"\bREMASTERED\b", r"\bEXTENDED\b", r"\bUNRATED\b",
     r"\bDIRECTORS?[\s\.]?CUT\b",
     r"\bComplete\b",
-    r"\bNF\b", r"\bAMZN\b", r"\bSUCCESSFULCRAB\b",
+    r"\bNF\b", r"\bAMZN\b", r"\bSUCCESSFULCRAB\b", r"\bExKinoRay\b",
+    r"\bFeranki\d*\b", r"\bscarabey\b",
     r"\bDVDScr\b", r"\bDVDRip\b", r"\bREPACK\b",
-    r"\bHDCAM\b",   # full-word only; plain CAM/TS/TC/MAX are too ambiguous
-    r"\bPROPER\b", r"\bCOMPLETE\b",
+    r"\bHDCAM\b", r"\bDLRip\b", r"\baWEBRip\b",
+    r"\bPROPER\b", r"\bCOMPLETE\b", r"\bCriterion\b",
+    r"\bESub\b", r"\bEng\b", r"\bFHC\b", r"\biTA\b",
     r"\bION265\b", r"\beztv(?:\.re)?\b", r"\bGalaxyTV\b", r"\bUKB\b",
     r"\bHMAX\b",
     r"\bWEB\b",     # standalone WEB separator (e.g. "S02E04.WEB.H264")
@@ -332,6 +334,66 @@ def load_token() -> str:
     )
 
 
+# ── Organize loose videos ─────────────────────────────────────────────────────
+
+def organize_loose_videos(library: Path) -> int:
+    """Move loose video files at the library root into their own folders.
+
+    For each video file sitting directly in the library (not in a subfolder),
+    creates a folder named after the video (using the clean title from
+    parse_folder_name, preserving the year if present), moves the video into
+    it, and also moves any sidecar files with the same stem (.srt, .nfo, .txt,
+    .jpg, .png).
+
+    Returns the number of videos organized.
+    """
+    SIDECAR_EXTS = {".srt", ".sub", ".idx", ".nfo", ".txt", ".jpg", ".jpeg", ".png"}
+
+    loose = [f for f in library.iterdir()
+             if f.is_file()
+             and _is_real_file(f)
+             and f.suffix.lower() in VIDEO_EXTS]
+    if not loose:
+        return 0
+
+    count = 0
+    for video in sorted(loose):
+        # Build a clean folder name: use the video stem as-is (preserving the
+        # original scene-release name), which mirrors how the rest of the
+        # library is already structured. EasyPlay's clean_media_name will
+        # handle display cleaning.
+        folder_name = video.stem
+        dest_dir = library / folder_name
+
+        # Avoid collisions: if a folder already exists with that name, the
+        # video probably belongs there — move it in without creating a new one.
+        dest_dir.mkdir(exist_ok=True)
+
+        dest_file = dest_dir / video.name
+        if dest_file.exists():
+            print(f"  ⚠ {video.name} already in {folder_name}/, skipping")
+            continue
+
+        # Move video
+        shutil.move(str(video), str(dest_file))
+        print(f"  📁 {video.name} → {folder_name}/")
+
+        # Move any sidecars with matching stem or name prefix.
+        # Matches both "movie.srt" (same stem) and "movie.mkv_cover.jpg"
+        # (name starts with the video stem).
+        for sidecar in list(library.iterdir()):
+            if (sidecar.is_file()
+                    and _is_real_file(sidecar)
+                    and sidecar.name.startswith(video.stem)
+                    and sidecar.suffix.lower() in SIDECAR_EXTS):
+                shutil.move(str(sidecar), str(dest_dir / sidecar.name))
+                print(f"       + {sidecar.name}")
+
+        count += 1
+
+    return count
+
+
 # ── main ─────────────────────────────────────────────────────────────────────
 
 def pick_library_folder() -> Path | None:
@@ -382,6 +444,10 @@ def main():
 
     if not args.library.is_dir():
         sys.exit(f"Not a directory: {args.library}")
+
+    organized = organize_loose_videos(args.library)
+    if organized:
+        print(f"Organized {organized} loose video(s) into folders.\n")
 
     token = load_token()
     client = TMDBClient(token)

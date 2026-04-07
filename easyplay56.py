@@ -381,7 +381,7 @@ _CLEAN_PATTERNS = [
     r"\bBRRip\b", r"\bBDRip\b",
     r"\bBluRay\b", r"\bBlu[\- ]Ray\b",
     r"\bHDRip\b", r"\bHDTV\b", r"\bSDTV\b",
-    r"\bHDCAM\b", r"\bDVDRip\b", r"\bDVDScr\b", r"\bDVD\b",
+    r"\bHDCAM\b", r"\bDLRip\b", r"\baWEBRip\b", r"\bDVDRip\b", r"\bDVDScr\b", r"\bDVD\b",
 
     # Codecs
     r"\bHEVC\b", r"\bx26[45]\b", r"\bh\.?26[45]\b", r"\bH264\b", r"\bH265\b",
@@ -407,9 +407,11 @@ _CLEAN_PATTERNS = [
     r"\bION265\b", r"\bNeoNoir\b", r"\bFENiX\b", r"\bMeGusta\b",
     r"\bi_c\b", r"\bTGx\b", r"\bBONE\b", r"\bUKB\b",
     r"\bSUCCESSFULCRAB\b", r"\bSuccessfulCrab\b",
+    r"\bExKinoRay\b", r"\bFeranki\d*\b", r"\bscarabey\b",
 
     # Edition tags
-    r"\bPROPER\b", r"\bREPACK\b", r"\bINTERNAL\b", r"\bLIMITED\b",
+    r"\bPROPER\b", r"\bREPACK\b", r"\bCriterion\b",
+    r"\bESub\b", r"\bEng\b", r"\bFHC\b", r"\biTA\b", r"\bINTERNAL\b", r"\bLIMITED\b",
     r"\bUNRATED\b", r"\bEXTENDED\b", r"\bDIRECTORS?[\s\.]?CUT\b",
     r"\bREMASTERED\b", r"\bCOMPLETE\b",
 
