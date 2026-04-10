@@ -207,5 +207,5 @@ if [[ "$EXTERNAL_BT" -eq 1 ]]; then
 fi
 echo "  2. For media on a USB drive:  ./setup-usb-media.sh"
 echo "     Otherwise drop videos into ~/Desktop/codevideos/"
-echo "  3. Test run:    python3 $REPO_DIR/easyplay55.py"
+echo "  3. Test run:    python3 $REPO_DIR/easyplay58.py"
 echo "  4. When happy:  sudo systemctl enable --now easyplay.service"

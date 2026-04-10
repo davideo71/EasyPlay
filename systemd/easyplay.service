@@ -11,7 +11,7 @@ WorkingDirectory=%REPO%
 Environment=HOME=%HOME%
 Environment=DISPLAY=:0
 Environment=XDG_RUNTIME_DIR=/run/user/1000
-ExecStart=/usr/bin/python3 %REPO%/easyplay55.py
+ExecStart=/usr/bin/python3 %REPO%/easyplay58.py
 Restart=on-failure
 RestartSec=3
 StandardOutput=journal
