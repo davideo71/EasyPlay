@@ -10,8 +10,9 @@ Group=%USER%
 WorkingDirectory=%REPO%
 Environment=HOME=%HOME%
 Environment=DISPLAY=:0
+Environment=WAYLAND_DISPLAY=wayland-0
 Environment=XDG_RUNTIME_DIR=/run/user/1000
-ExecStart=/usr/bin/python3 %REPO%/easyplay58.py
+ExecStart=/usr/bin/python3 %REPO%/easyplay59.py
 Restart=on-failure
 RestartSec=3
 StandardOutput=journal

@@ -82,8 +82,18 @@ NOISE_PATTERNS = [
     r"\bWEB[\- \.]?RIP\b", r"\bWEB[\- \.]?DL\b", r"\bBRRip\b",
     r"\bBluRay\b", r"\bBlu[\- ]Ray\b",
     r"\bHDRip\b", r"\bHDTV\b",
-    r"\bHEVC\b", r"\bx26[45]\b", r"\bh\.?26[45]\b",
-    r"\bAAC\d*(?:\.\d)?\b", r"\bAC3\b", r"\bDTS\b",
+    r"\bHEVC\b", r"\bx[\s\.]?26[45]\b", r"\bh[\s\.]?26[45]\b",
+    # Audio codecs — consume any sticky channel digits so that e.g.
+    # OPUS51 / AC35 1 / DTS-HD MA 5 1 don't leave orphan numbers behind.
+    r"\bAAC\d*(?:\.\d)?(?:[\s\.]?\d)*\b",
+    r"\bAC3(?:[\s\.]?\d)*\b",
+    r"\bDTS(?:[\s\.\-]?HD)?(?:[\s\.]?MA)?(?:[\s\.]?\d)*\b",
+    r"\bMA(?:[\s\.]?\d)*\b",  # stray "MA" from DTS-HD MA variants
+    r"\bTrueHD(?:[\s\.]?\d)*\b",
+    r"\bFLAC(?:[\s\.]?\d)*\b",
+    r"\bEAC3(?:[\s\.]?\d)*\b", r"\bE-AC-3(?:[\s\.]?\d)*\b",
+    r"\bOPUS(?:[\s\.]?\d)*\b",
+    r"\bAtmos\b", r"\bMP3\b", r"\bOGG\b",
     # Audio channel specs as whole chunks (longest first so alternation
     # doesn't grab a shorter prefix and leave an orphan digit behind)
     r"\bDDP?[\s\.]?\d[\s\.]\d\b",   # DD 5 1 / DDP5.1 / DD.5.1
@@ -108,9 +118,15 @@ NOISE_PATTERNS = [
     r"\bHMAX\b",
     r"\bWEB\b",     # standalone WEB separator (e.g. "S02E04.WEB.H264")
     r"\bH264\b", r"\bH265\b",
-    r"-\w+$",                   # trailing -GROUP tag
 ]
 NOISE_RE = re.compile("|".join(NOISE_PATTERNS), re.I)
+
+# Applied as a SECOND pass after NOISE_RE, so the \B lookbehind sees the
+# already-blanked string (e.g. "Spider-Man -NTb" with a space before the
+# trailing dash), not the original. \B keeps hyphenated titles like
+# "Spider-Man" safe because a dash preceded by a word char fails the
+# non-word-boundary test.
+TRAILING_GROUP_RE = re.compile(r"\B-[A-Za-z][A-Za-z0-9]{2,}[\s\-]*$")
 
 
 @dataclass
@@ -144,6 +160,10 @@ def parse_folder_name(name: str) -> ParsedTitle:
     # Strip the 4-digit year (anywhere, not just in brackets)
     if year:
         cleaned = re.sub(rf"\b{year}\b", " ", cleaned)
+    # Second pass: strip any leftover trailing scene-release group like
+    # "-EMPATHY" / "-NTb" now that the noise-substituted string has
+    # whitespace before the dash, so the \B anchor can see non-word context.
+    cleaned = TRAILING_GROUP_RE.sub(" ", cleaned)
     # Collapse whitespace
     cleaned = re.sub(r"\s+", " ", cleaned).strip(" -")
 
