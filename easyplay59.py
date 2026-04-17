@@ -590,7 +590,12 @@ def _pick_cover(subdir):
 
 def scan_media_library(folder=None):
     root = folder or get_media_folder(); items = []
-    if not root.is_dir(): return items
+    try:
+        if not root.is_dir(): return items
+    except OSError:
+        # Symlink target is a dead mount (e.g. USB drive not plugged in)
+        _log(f"Media folder not accessible: {root} (drive not mounted?)")
+        return items
     for subdir in sorted(root.iterdir()):
         if not subdir.is_dir() or _is_hidden(subdir): continue
         name = clean_media_name(subdir.name)
