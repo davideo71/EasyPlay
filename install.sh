@@ -193,7 +193,18 @@ if [[ -d "$NM_CONF_D" ]]; then
     fi
 fi
 
-# ── 10. apt cache cleanup ────────────────────────────────────────────────────
+# ── 10. Desktop shortcut ─────────────────────────────────────────────────────
+DESKTOP_FILE="$REPO_DIR/easyplay.desktop"
+if [[ -f "$DESKTOP_FILE" ]]; then
+    DEST="$USER_HOME/Desktop/easyplay.desktop"
+    log "Installing desktop shortcut…"
+    sudo -u "$USER_NAME" cp "$DESKTOP_FILE" "$DEST"
+    chmod +x "$DEST"
+    # Trust the desktop file so labwc/PCManFM doesn't show an "untrusted" warning
+    sudo -u "$USER_NAME" gio set "$DEST" metadata::trusted true 2>/dev/null || true
+fi
+
+# ── 11. apt cache cleanup ────────────────────────────────────────────────────
 log "Cleaning apt cache…"
 sudo apt-get clean
 sudo apt-get autoremove -y >/dev/null 2>&1 || true

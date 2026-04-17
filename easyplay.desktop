@@ -1,0 +1,10 @@
+[Desktop Entry]
+Name=EasyPlay
+Comment=Accessible media player
+Exec=/usr/bin/python3 /home/david/Desktop/EasyPlay/easyplay59.py
+Path=/home/david/Desktop/EasyPlay
+Icon=/home/david/Desktop/EasyPlay/icon.svg
+Terminal=false
+Type=Application
+Categories=AudioVideo;Video;Player;
+StartupNotify=true
