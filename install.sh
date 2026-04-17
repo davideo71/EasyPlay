@@ -129,6 +129,23 @@ else
     warn "No systemd/easyplay.service found in repo — skipping."
 fi
 
+# ── 5b. BLE watcher service (launches EasyPlay on remote button press) ───────
+WATCHER_SRC="$REPO_DIR/systemd/easyplay-watcher.service"
+WATCHER_DST="/etc/systemd/system/easyplay-watcher.service"
+if [[ -f "$WATCHER_SRC" ]]; then
+    log "Installing BLE watcher service (enabled by default)…"
+    sudo install -m 0644 "$WATCHER_SRC" "$WATCHER_DST"
+    sudo sed -i \
+        -e "s|%USER%|$USER_NAME|g" \
+        -e "s|%HOME%|$USER_HOME|g" \
+        -e "s|%REPO%|$REPO_DIR|g" \
+        "$WATCHER_DST"
+    sudo systemctl daemon-reload
+    sudo systemctl enable easyplay-watcher.service 2>/dev/null || true
+    log "Watcher installed at $WATCHER_DST (enabled)."
+    log "Start now with: sudo systemctl start easyplay-watcher.service"
+fi
+
 # ── 6. Shrink rpi-swap file from 2 GiB to 512 MiB ────────────────────────────
 # Pi OS defaults to ~2 GiB swap. EasyPlay (pygame + VLC) doesn't need that much.
 # Drop-in lives in /etc/rpi/swap.conf.d/, resize runs immediately.

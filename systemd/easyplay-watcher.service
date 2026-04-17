@@ -1,0 +1,22 @@
+[Unit]
+Description=EasyPlay BLE watcher — launches player on remote button press
+After=graphical.target bluetooth.service
+Wants=bluetooth.service
+
+[Service]
+Type=simple
+User=%USER%
+Group=%USER%
+WorkingDirectory=%REPO%
+Environment=HOME=%HOME%
+Environment=DISPLAY=:0
+Environment=WAYLAND_DISPLAY=wayland-0
+Environment=XDG_RUNTIME_DIR=/run/user/1000
+ExecStart=/usr/bin/python3 %REPO%/tools/easyplay_watcher.py
+Restart=on-failure
+RestartSec=5
+StandardOutput=journal
+StandardError=journal
+
+[Install]
+WantedBy=graphical.target
