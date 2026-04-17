@@ -588,12 +588,23 @@ def _pick_cover(subdir):
                 return f
     return sorted(images, key=lambda f: f.name.lower())[0]
 
+def check_media_folder():
+    """Check if the media folder is accessible. Returns (ok, reason) tuple."""
+    root = get_media_folder()
+    try:
+        if root.is_dir():
+            return True, ""
+    except OSError:
+        pass
+    if root.is_symlink():
+        return False, "USB drive not connected"
+    return False, f"Media folder not found:\n{root}"
+
 def scan_media_library(folder=None):
     root = folder or get_media_folder(); items = []
     try:
         if not root.is_dir(): return items
     except OSError:
-        # Symlink target is a dead mount (e.g. USB drive not plugged in)
         _log(f"Media folder not accessible: {root} (drive not mounted?)")
         return items
     for subdir in sorted(root.iterdir()):
@@ -2041,6 +2052,32 @@ def main():
     _hide_mouse(); cec_startup(); start_ble_listener()
     sl = compute_layout(w, h)
     pl = compute_layout(w, h, aspect=PICKER_FRAME_ASPECT, center_scale=1.063*0.75, height_mult=0.70*0.90)
+
+    # ── Wait for media drive if needed ───────────────────────────────────────
+    wait_font = pygame.font.SysFont("Helvetica", 48, bold=True)
+    wait_small = pygame.font.SysFont("Helvetica", 28)
+    media_ok, media_reason = check_media_folder()
+    while not media_ok:
+        screen.fill((10, 10, 15))
+        # Title
+        title_surf = wait_font.render("EasyPlay", True, (102, 126, 234))
+        screen.blit(title_surf, (w // 2 - title_surf.get_width() // 2, h // 3 - 60))
+        # Reason
+        for i, line in enumerate(media_reason.split("\n")):
+            reason_surf = wait_small.render(line, True, (200, 200, 200))
+            screen.blit(reason_surf, (w // 2 - reason_surf.get_width() // 2, h // 2 - 20 + i * 40))
+        # Hint
+        dots = "." * (1 + int(time.monotonic() * 2) % 3)
+        hint_surf = wait_small.render(f"Waiting for drive{dots}", True, (100, 100, 100))
+        screen.blit(hint_surf, (w // 2 - hint_surf.get_width() // 2, h * 2 // 3))
+        pygame.display.flip()
+        # Check for quit
+        for event in pygame.event.get():
+            if event.type == pygame.QUIT or (event.type == pygame.KEYDOWN and event.key == pygame.K_ESCAPE):
+                stop_ble_listener(); pygame.quit(); sys.exit(0)
+        time.sleep(0.5)
+        media_ok, media_reason = check_media_folder()
+
     items = scan_media_library()
     if not items:
         items = [MediaItem(name=f"Item {i+1}", cover_path=None, video_path=None,
