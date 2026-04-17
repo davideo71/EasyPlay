@@ -68,7 +68,9 @@ EXCLUDE_FOLDERS = {
 
 # ── Folder-name parsing ──────────────────────────────────────────────────────
 
-YEAR_RE = re.compile(r"[\(\[\. ](19\d{2}|20\d{2})[\)\]\. ]")
+# Prefer years in brackets/parens like (2019) or [2019] over bare years like .2019.
+YEAR_BRACKET_RE = re.compile(r"[\(\[](19\d{2}|20\d{2})[\)\]]")
+YEAR_BARE_RE = re.compile(r"[\. ](19\d{2}|20\d{2})[\. ]")
 SEASON_RE = re.compile(r"\bS(?:eason)?\.?\s*(\d{1,2})(?:E\d{1,3})?\b", re.I)
 EPISODE_RE = re.compile(r"\bS\d{1,2}E\d{1,3}\b", re.I)
 
@@ -143,7 +145,9 @@ class ParsedTitle:
 
 def parse_folder_name(name: str) -> ParsedTitle:
     raw = name
-    year_match = YEAR_RE.search(" " + name + " ")
+    # Prefer bracketed year (2019) over bare year .2019. to avoid grabbing
+    # numeric titles like "1917" as the year.
+    year_match = YEAR_BRACKET_RE.search(name) or YEAR_BARE_RE.search(" " + name + " ")
     year = int(year_match.group(1)) if year_match else None
 
     season_match = SEASON_RE.search(name)
