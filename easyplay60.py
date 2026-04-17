@@ -2082,12 +2082,10 @@ def main():
                 stop_ble_listener(); pygame.quit(); sys.exit(0)
             if event.type == pygame.KEYDOWN and event.key in (pygame.K_ESCAPE, pygame.K_q):
                 stop_ble_listener(); pygame.quit(); sys.exit(0)
-        # Also check BLE key queue for On/Off button
+        # Drain BLE key queue so it doesn't pile up while waiting
         try:
             while not _ble_key_queue.empty():
-                char = _ble_key_queue.get_nowait()
-                if char in ('O', 'o'):
-                    stop_ble_listener(); pygame.quit(); sys.exit(0)
+                _ble_key_queue.get_nowait()
         except Exception:
             pass
         time.sleep(0.5)
