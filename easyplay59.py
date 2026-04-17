@@ -503,8 +503,10 @@ def clean_media_name(name):
     # Apply all noise patterns case-insensitively
     for pat in _CLEAN_PATTERNS:
         cleaned = re.sub(pat, " ", cleaned, flags=re.IGNORECASE)
-    # Strip standalone 4-digit years (1900–2099)
-    cleaned = re.sub(r"\b(?:19|20)\d{2}\b", " ", cleaned)
+    # Note: we do NOT strip bare 4-digit years here. Years inside brackets
+    # like (2019) or [2019] are already consumed by the bracket patterns
+    # above. Remaining bare year-like numbers are more likely to be actual
+    # titles ("1917", "2001 A Space Odyssey") than release metadata.
     # Collapse whitespace
     cleaned = re.sub(r"\s+", " ", cleaned).strip()
     # Trim leftover punctuation at edges
