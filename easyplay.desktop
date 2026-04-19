@@ -1,7 +1,7 @@
 [Desktop Entry]
 Name=EasyPlay
 Comment=Accessible media player
-Exec=/usr/bin/python3 /home/david/Desktop/EasyPlay/easyplay60.py
+Exec=/usr/bin/python3 /home/david/Desktop/EasyPlay/easyplay61.py
 Path=/home/david/Desktop/EasyPlay
 Icon=/home/david/Desktop/EasyPlay/icon.svg
 Terminal=false
