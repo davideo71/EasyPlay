@@ -9,6 +9,7 @@ easyplay[0-5]*.py
 !easyplay59.py
 !easyplay60.py
 !easyplay61.py
+!easyplay62.py
 remote_main_*.py
 remote_c3_v[0-5].py
 
