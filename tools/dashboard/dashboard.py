@@ -1,30 +1,36 @@
 #!/usr/bin/env python3
 """
-EasyPlay dashboard — Mac-side status view for LuckyPi2.
+EasyPlay dashboard — status view for a Pi running EasyPlay.
 
-Starts a small Flask server on the Mac (localhost:8765 by default) that
-serves a web dashboard showing the state of easyplay on the Pi.
+Two run modes:
 
-Design principle: ZERO IMPACT on the Pi's video playback.
+  LOCAL MODE (on the Pi itself):
+    python3 dashboard.py --local
+    → Flask server on 0.0.0.0:8765, collects data via local subprocess calls.
+    → Access from any device on the same Tailscale / LAN:
+        http://<pi-ip>:8765
 
-- No daemon / persistent service runs on the Pi.
-- Polling is MANUAL (Refresh button) or hourly at most.
-- Single SSH call per poll, using ControlMaster so repeated calls
-  piggy-back on one persistent channel (~10ms per query).
-- All queries are read-only and bounded in time (milliseconds of Pi CPU).
+  REMOTE MODE (on the Mac, SSH into a Pi):
+    python3 dashboard.py
+    → Flask server on 127.0.0.1:8765, collects data via one SSH call per poll.
+    → SSH ControlMaster keeps the connection warm (~130ms per query).
 
-Usage:
-    python3 tools/dashboard/dashboard.py
-    # then open http://localhost:8765 in a browser
+Design goal: minimum impact on the Pi's video playback.
+  - No persistent dashboard process on the Pi (remote mode)
+     OR one small Flask process with idle cost < 30 MB RAM, ~0% CPU (local mode)
+  - Polling is manual (Refresh button) or hourly at most.
+  - Each poll reads bounded, read-only data (ps, readlink, cat) — milliseconds.
 
-Environment variables:
-    EASYPLAY_HOST   target Pi (default: luckypi2.local)
-    EASYPLAY_USER   ssh user (default: david)
-    EASYPLAY_PORT   dashboard local port (default: 8765)
+Environment variables (remote mode):
+  EASYPLAY_HOST   target Pi         default: luckypi2.local
+  EASYPLAY_USER   ssh user          default: david
+  EASYPLAY_PORT   dashboard port    default: 8765
+  EASYPLAY_BIND   interface to bind default: 127.0.0.1 (remote) or 0.0.0.0 (local)
 """
 
 from __future__ import annotations
 
+import argparse
 import json
 import os
 import subprocess
@@ -41,11 +47,9 @@ HOST       = os.environ.get("EASYPLAY_HOST", "luckypi2.local")
 USER       = os.environ.get("EASYPLAY_USER", "david")
 DASH_PORT  = int(os.environ.get("EASYPLAY_PORT", "8765"))
 
-# SSH ControlMaster keeps one connection warm; subsequent queries reuse it.
-# Socket lives in /tmp; persists 10 minutes after last use.
 SSH_CTRL_PATH = f"/tmp/easyplay-dashboard-{USER}-{HOST}.sock"
 SSH_OPTS = [
-    "-o", f"ControlMaster=auto",
+    "-o", "ControlMaster=auto",
     "-o", f"ControlPath={SSH_CTRL_PATH}",
     "-o", "ControlPersist=10m",
     "-o", "ConnectTimeout=5",
@@ -53,159 +57,153 @@ SSH_OPTS = [
     "-o", "BatchMode=yes",
 ]
 
-# ── The single SSH command that gathers everything in one round-trip ────────
-#
-# Writes a JSON blob to stdout. All the queries are bounded, read-only, and
-# take milliseconds. No sudo (only systemctl is-active/list-units which are
-# fine for a regular user).
-REMOTE_SCRIPT = r'''
-python3 - <<'PYEOF'
-import json, os, re, time
-from pathlib import Path
 
-def sh(cmd):
-    import subprocess
+# ── Status collector (runs on the Pi, either directly or via ssh) ───────────
+#
+# All queries are read-only and bounded (milliseconds of CPU). Called from
+# Flask locally OR invoked remotely via `python3 dashboard.py --collect`.
+
+def _sh(cmd: str, timeout: float = 3.0) -> str:
     try:
-        r = subprocess.run(cmd, shell=True, capture_output=True, text=True, timeout=3)
+        r = subprocess.run(cmd, shell=True, capture_output=True, text=True, timeout=timeout)
         return (r.stdout or "").strip()
-    except Exception as e:
+    except Exception:
         return ""
 
-data = {"ts": time.time()}
 
-# --- process ----------------------------------------------------------------
-easyplay_pid = None
-for line in sh("pgrep -af 'easyplay[0-9].*\\.py'").splitlines():
-    parts = line.split(maxsplit=1)
-    if parts and parts[0].isdigit():
-        easyplay_pid = int(parts[0]); break
+def collect_status() -> dict:
+    """Collect the full status dict. Runs locally on the Pi."""
+    data = {"ts": time.time()}
 
-watcher_pid = None
-for line in sh("pgrep -af easyplay_watcher").splitlines():
-    parts = line.split(maxsplit=1)
-    if parts and parts[0].isdigit():
-        watcher_pid = int(parts[0]); break
+    # --- process state ------------------------------------------------------
+    easyplay_pid = None
+    for line in _sh(r"pgrep -af 'easyplay[0-9].*\.py'").splitlines():
+        parts = line.split(maxsplit=1)
+        if parts and parts[0].isdigit():
+            easyplay_pid = int(parts[0])
+            break
 
-proc = {}
-if easyplay_pid:
-    ps = sh(f"ps -p {easyplay_pid} -o pid=,%cpu=,%mem=,etime=,cmd= 2>/dev/null")
-    if ps:
-        fields = ps.split(None, 4)
-        proc = {
-            "pid":     int(fields[0]),
-            "cpu":     float(fields[1]),
-            "mem":     float(fields[2]),
-            "uptime":  fields[3],
-            "cmd":     fields[4] if len(fields) > 4 else "",
-        }
-data["easyplay"] = proc
+    watcher_pid = None
+    for line in _sh("pgrep -af easyplay_watcher").splitlines():
+        parts = line.split(maxsplit=1)
+        if parts and parts[0].isdigit():
+            watcher_pid = int(parts[0])
+            break
 
-watcher = {}
-if watcher_pid:
-    ps = sh(f"ps -p {watcher_pid} -o pid=,%cpu=,%mem=,etime= 2>/dev/null")
-    if ps:
-        fields = ps.split()
-        watcher = {"pid": int(fields[0]), "cpu": float(fields[1]),
-                   "mem": float(fields[2]), "uptime": fields[3]}
-data["watcher"] = watcher
+    proc = {}
+    if easyplay_pid:
+        ps = _sh(f"ps -p {easyplay_pid} -o pid=,%cpu=,%mem=,etime=,cmd= 2>/dev/null")
+        if ps:
+            fields = ps.split(None, 4)
+            proc = {
+                "pid":    int(fields[0]),
+                "cpu":    float(fields[1]),
+                "mem":    float(fields[2]),
+                "uptime": fields[3],
+                "cmd":    fields[4] if len(fields) > 4 else "",
+            }
+    data["easyplay"] = proc
 
-# --- currently playing ------------------------------------------------------
-playing = None
-if easyplay_pid:
-    # readlink /proc/PID/fd/* — find any open video file.
-    # This does NOT require sudo for the user's own process.
-    try:
-        fd_dir = Path(f"/proc/{easyplay_pid}/fd")
-        for fd in fd_dir.iterdir():
-            try:
-                target = os.readlink(str(fd))
+    watcher = {}
+    if watcher_pid:
+        ps = _sh(f"ps -p {watcher_pid} -o pid=,%cpu=,%mem=,etime= 2>/dev/null")
+        if ps:
+            fields = ps.split()
+            watcher = {
+                "pid":    int(fields[0]),
+                "cpu":    float(fields[1]),
+                "mem":    float(fields[2]),
+                "uptime": fields[3],
+            }
+    data["watcher"] = watcher
+
+    # --- currently playing --------------------------------------------------
+    playing = None
+    if easyplay_pid:
+        try:
+            fd_dir = Path(f"/proc/{easyplay_pid}/fd")
+            for fd in fd_dir.iterdir():
+                try:
+                    target = os.readlink(str(fd))
+                except OSError:
+                    continue
                 low = target.lower()
-                if any(low.endswith(ext) for ext in (".mp4",".mkv",".avi",".mov",".webm",".m4v")):
+                if any(low.endswith(ext) for ext in (".mp4", ".mkv", ".avi", ".mov", ".webm", ".m4v")):
                     playing = target
                     break
-            except OSError:
-                continue
-    except OSError:
+        except OSError:
+            pass
+    data["playing_file"] = playing
+
+    # --- progress -----------------------------------------------------------
+    progress_path = Path.home() / "Desktop" / "EasyPlay" / "easyplay_progress.json"
+    history = []
+    current_progress = None
+    try:
+        prog = json.loads(progress_path.read_text())
+        entries = []
+        for key, v in prog.items():
+            entries.append({
+                "path":         v.get("path", key),
+                "name":         v.get("name", key.split("/")[-1]),
+                "position_sec": v.get("position_sec", 0),
+                "duration_sec": v.get("duration_sec", 0),
+                "completed":    bool(v.get("completed")),
+                "last_updated": v.get("last_updated", ""),
+            })
+        entries.sort(key=lambda e: e["last_updated"], reverse=True)
+        history = entries
+        if playing:
+            for e in entries:
+                if e["path"] == playing:
+                    current_progress = e
+                    break
+    except Exception:
         pass
-data["playing_file"] = playing
+    data["history"]          = history
+    data["current_progress"] = current_progress
 
-# --- progress ---------------------------------------------------------------
-progress_path = Path.home() / "Desktop" / "EasyPlay" / "easyplay_progress.json"
-history = []
-current_progress = None
-try:
-    prog = json.loads(progress_path.read_text())
-    entries = []
-    for key, v in prog.items():
-        entries.append({
-            "path":         v.get("path", key),
-            "name":         v.get("name", key.split("/")[-1]),
-            "position_sec": v.get("position_sec", 0),
-            "duration_sec": v.get("duration_sec", 0),
-            "completed":    bool(v.get("completed")),
-            "last_updated": v.get("last_updated", ""),
-        })
-    entries.sort(key=lambda e: e["last_updated"], reverse=True)
-    history = entries
-    if playing:
-        for e in entries:
-            if e["path"] == playing:
-                current_progress = e; break
-except Exception:
-    pass
-data["history"]          = history
-data["current_progress"] = current_progress
+    # --- BLE / watcher ------------------------------------------------------
+    ble = {
+        "watcher_service": _sh("systemctl is-active easyplay-watcher.service") or "unknown",
+        "recent_log":     [],
+        "adapter":        _sh("hciconfig hci0 2>/dev/null | head -3"),
+    }
+    log = _sh("journalctl -u easyplay-watcher.service --no-pager -n 5 2>/dev/null")
+    if log:
+        ble["recent_log"] = log.split("\n")
+    data["ble"] = ble
 
-# --- BLE --------------------------------------------------------------------
-ble = {}
-try:
-    wstatus = sh("systemctl is-active easyplay-watcher.service")
-    ble["watcher_service"] = wstatus or "unknown"
-    # Last 20 log lines from watcher
-    ble_log = sh("journalctl -u easyplay-watcher.service --no-pager -n 10 2>/dev/null | tail -5")
-    ble["recent_log"] = ble_log.split("\n") if ble_log else []
-    # BT adapter state
-    hci = sh("hciconfig hci0 2>/dev/null | head -3")
-    ble["adapter"] = hci
-except Exception:
-    pass
-data["ble"] = ble
-
-# --- system -----------------------------------------------------------------
-sysinfo = {
-    "hostname":  sh("hostname"),
-    "uptime":    sh("uptime -p"),
-    "load":      sh("uptime | sed 's/.*load average: //'"),
-    "mem":       sh("free -h | awk '/Mem:/ {print $3\" / \"$2\" used\"}'"),
-    "disk_sd":   sh("df -h / | tail -1 | awk '{print $3\" / \"$2\" (\"$5\" used)\"}'"),
-    "disk_media": sh("df -h /mnt/media 2>/dev/null | tail -1 | awk '{print $3\" / \"$2\" (\"$5\" used)\"}'"),
-    "temp_c":    "",
-    "ip":        sh("ip -brief addr | grep -E 'UP' | awk '{print $1\": \"$3}' | head -3 | tr '\\n' ' '"),
-    "service_easyplay": sh("systemctl is-active easyplay.service 2>/dev/null") or "",
-}
-try:
-    temp_raw = sh("cat /sys/class/thermal/thermal_zone0/temp 2>/dev/null")
+    # --- system -------------------------------------------------------------
+    sysinfo = {
+        "hostname":         _sh("hostname"),
+        "uptime":           _sh("uptime -p"),
+        "load":             _sh("uptime | sed 's/.*load average: //'"),
+        "mem":              _sh("free -h | awk '/Mem:/ {print $3\" / \"$2\" used\"}'"),
+        "disk_sd":          _sh("df -h / | tail -1 | awk '{print $3\" / \"$2\" (\"$5\" used)\"}'"),
+        "disk_media":       _sh("df -h /mnt/media 2>/dev/null | tail -1 | awk '{print $3\" / \"$2\" (\"$5\" used)\"}'"),
+        "temp_c":           "",
+        "ip":               _sh("ip -brief addr | grep -E 'UP' | awk '{print $1\": \"$3}' | head -3 | tr '\\n' ' '"),
+        "service_easyplay": _sh("systemctl is-active easyplay.service 2>/dev/null") or "",
+    }
+    temp_raw = _sh("cat /sys/class/thermal/thermal_zone0/temp 2>/dev/null")
     if temp_raw.isdigit():
         sysinfo["temp_c"] = f"{int(temp_raw)/1000:.1f}°C"
-except Exception:
-    pass
-data["system"] = sysinfo
+    data["system"] = sysinfo
 
-print(json.dumps(data))
-PYEOF
-'''
+    return data
 
 
-def fetch_status() -> dict:
-    """One round-trip SSH call that runs REMOTE_SCRIPT and returns parsed JSON.
+# ── Remote-mode fetcher: runs `dashboard.py --collect` over SSH ─────────────
 
-    Returns {"error": "..."} on failure. First call pays SSH handshake; later
-    calls reuse the ControlMaster channel for near-zero latency.
-    """
+def fetch_remote() -> dict:
     start = time.monotonic()
     try:
+        # The Pi-side script is this same file; we expect it at the path below.
+        remote_script = "/home/david/Desktop/EasyPlay/tools/dashboard/dashboard.py"
         result = subprocess.run(
-            ["ssh", *SSH_OPTS, f"{USER}@{HOST}", "bash", "-c", REMOTE_SCRIPT],
+            ["ssh", *SSH_OPTS, f"{USER}@{HOST}",
+             f"python3 {remote_script} --collect"],
             capture_output=True, text=True, timeout=15,
         )
         elapsed_ms = int((time.monotonic() - start) * 1000)
@@ -213,19 +211,19 @@ def fetch_status() -> dict:
             return {"error": f"ssh exit {result.returncode}: {(result.stderr or '').strip()[:300]}",
                     "elapsed_ms": elapsed_ms}
         out = (result.stdout or "").strip()
-        # The script prints only the JSON — any pre/post output is from shell
         first = out.find("{")
         last  = out.rfind("}")
         if first == -1 or last == -1:
-            return {"error": f"no JSON in output (first 300 chars: {out[:300]!r})",
-                    "elapsed_ms": elapsed_ms}
+            return {"error": f"no JSON in output: {out[:300]!r}", "elapsed_ms": elapsed_ms}
         data = json.loads(out[first:last+1])
         data["_fetch_elapsed_ms"] = elapsed_ms
         return data
     except subprocess.TimeoutExpired:
-        return {"error": "ssh timeout (>15s)", "elapsed_ms": int((time.monotonic() - start) * 1000)}
+        return {"error": "ssh timeout (>15s)",
+                "elapsed_ms": int((time.monotonic() - start) * 1000)}
     except Exception as e:
-        return {"error": f"fetch failed: {e}", "elapsed_ms": int((time.monotonic() - start) * 1000)}
+        return {"error": f"fetch failed: {e}",
+                "elapsed_ms": int((time.monotonic() - start) * 1000)}
 
 
 # ── Dashboard HTML (inline so this file is self-contained) ──────────────────
@@ -235,6 +233,7 @@ DASHBOARD_HTML = r"""
 <html lang="en">
 <head>
   <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
   <title>EasyPlay Dashboard</title>
   <style>
     * { box-sizing: border-box; margin: 0; padding: 0; }
@@ -295,7 +294,7 @@ DASHBOARD_HTML = r"""
                  margin-bottom: 0.3rem; }
 
     .history-row {
-      display: grid; grid-template-columns: 52px 1fr 80px;
+      display: grid; grid-template-columns: 60px 1fr 80px;
       gap: 0.8rem; padding: 0.45rem 0;
       border-bottom: 1px solid #1c1c24; font-size: 0.88rem;
       align-items: center;
@@ -304,6 +303,7 @@ DASHBOARD_HTML = r"""
     .history-row .pct { color: #a893e8; font-variant-numeric: tabular-nums; text-align: right; }
     .history-row .name { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
     .history-row.done .pct { color: #6fd98c; }
+    .history-row .age { color: #5a5a65; font-size: 0.8rem; }
 
     details { margin-top: 0.5rem; }
     summary { cursor: pointer; color: #a893e8; font-size: 0.88rem;
@@ -344,7 +344,6 @@ let autoTimer = null;
 const autoCheckbox = document.getElementById('autorefresh');
 autoCheckbox.addEventListener('change', () => {
   if (autoCheckbox.checked) {
-    // 1 hour = 3600000 ms
     autoTimer = setInterval(refresh, 3600 * 1000);
   } else if (autoTimer) {
     clearInterval(autoTimer); autoTimer = null;
@@ -358,16 +357,12 @@ function fmtTime(sec) {
   const s = sec % 60;
   return h > 0 ? `${h}h ${m}m` : `${m}m ${s}s`;
 }
-function pct(cur, total) {
-  if (!total) return 0;
-  return Math.round((cur / total) * 100);
-}
+function pct(cur, total) { if (!total) return 0; return Math.round((cur / total) * 100); }
 function fmtAge(isoStr) {
   if (!isoStr) return '';
-  const now = Date.now();
-  let t = Date.parse(isoStr);
+  const t = Date.parse(isoStr);
   if (isNaN(t)) return '';
-  const sec = Math.floor((now - t) / 1000);
+  const sec = Math.floor((Date.now() - t) / 1000);
   if (sec < 60) return `${sec}s ago`;
   if (sec < 3600) return `${Math.floor(sec/60)}m ago`;
   if (sec < 86400) return `${Math.floor(sec/3600)}h ago`;
@@ -396,9 +391,6 @@ function render(d) {
     content.innerHTML = `<div class="card error-card">
       <h2>Connection error</h2>
       <pre>${d.error}</pre>
-      <p style="color:#7a7a80; margin-top:0.5rem; font-size:0.8rem;">
-        Check that the Pi is on and reachable. SSH key should be authorized.
-      </p>
     </div>`;
     return;
   }
@@ -407,13 +399,13 @@ function render(d) {
 
   const parts = [];
 
-  // --- Now playing ---
+  // Now playing
   if (d.current_progress) {
     const e = d.current_progress;
     const p = pct(e.position_sec, e.duration_sec);
     parts.push(`<div class="card">
       <h2>▶ Now Playing</h2>
-      <div class="title-big">${e.name || e.path.split('/').pop()}</div>
+      <div class="title-big">${escapeHtml(e.name || e.path.split('/').pop())}</div>
       <div class="kv">
         <span class="k">Position</span><span class="v">${fmtTime(e.position_sec)} / ${fmtTime(e.duration_sec)} · ${p}%</span>
       </div>
@@ -422,7 +414,7 @@ function render(d) {
   } else if (d.playing_file) {
     parts.push(`<div class="card">
       <h2>▶ Now Playing (no progress data)</h2>
-      <div class="v">${d.playing_file.split('/').pop()}</div>
+      <div class="v">${escapeHtml(d.playing_file.split('/').pop())}</div>
     </div>`);
   } else {
     parts.push(`<div class="card">
@@ -431,7 +423,6 @@ function render(d) {
     </div>`);
   }
 
-  // --- Process state ---
   const ep = d.easyplay || {};
   const wp = d.watcher || {};
   const epBadge = ep.pid
@@ -456,7 +447,6 @@ function render(d) {
     </div>
   </div>`);
 
-  // --- BLE ---
   const ble = d.ble || {};
   const wStatus = ble.watcher_service || 'unknown';
   parts.push(`<div class="card">
@@ -465,30 +455,28 @@ function render(d) {
       <span class="k">watcher service</span><span class="v">
         <span class="badge ${wStatus === 'active' ? 'ok' : 'warn'}">${wStatus}</span>
       </span>
-      <span class="k">adapter</span><span class="v"><pre style="font-size:0.78rem; color:#9090a0;">${ble.adapter || '(none)'}</pre></span>
+      <span class="k">adapter</span><span class="v"><pre style="font-size:0.78rem; color:#9090a0;">${escapeHtml(ble.adapter || '(none)')}</pre></span>
     </div>
     <details><summary>Recent watcher log</summary>
       ${(ble.recent_log || []).map(l => `<div class="log-line">${escapeHtml(l)}</div>`).join('')}
     </details>
   </div>`);
 
-  // --- System ---
   const s = d.system || {};
   parts.push(`<div class="card">
     <h2>🖥 System</h2>
     <div class="kv">
-      <span class="k">hostname</span><span class="v">${s.hostname || '?'}</span>
-      <span class="k">uptime</span><span class="v">${s.uptime || '?'}</span>
-      <span class="k">load avg</span><span class="v">${s.load || '?'}</span>
-      <span class="k">CPU temp</span><span class="v">${s.temp_c || '?'}</span>
-      <span class="k">memory</span><span class="v">${s.mem || '?'}</span>
-      <span class="k">disk /</span><span class="v">${s.disk_sd || '?'}</span>
-      <span class="k">disk /mnt/media</span><span class="v">${s.disk_media || 'not mounted'}</span>
-      <span class="k">network</span><span class="v">${s.ip || '?'}</span>
+      <span class="k">hostname</span><span class="v">${escapeHtml(s.hostname || '?')}</span>
+      <span class="k">uptime</span><span class="v">${escapeHtml(s.uptime || '?')}</span>
+      <span class="k">load avg</span><span class="v">${escapeHtml(s.load || '?')}</span>
+      <span class="k">CPU temp</span><span class="v">${escapeHtml(s.temp_c || '?')}</span>
+      <span class="k">memory</span><span class="v">${escapeHtml(s.mem || '?')}</span>
+      <span class="k">disk /</span><span class="v">${escapeHtml(s.disk_sd || '?')}</span>
+      <span class="k">disk /mnt/media</span><span class="v">${escapeHtml(s.disk_media || 'not mounted')}</span>
+      <span class="k">network</span><span class="v">${escapeHtml(s.ip || '?')}</span>
     </div>
   </div>`);
 
-  // --- History ---
   const h = d.history || [];
   const watched = h.filter(e => e.position_sec > 60 || e.completed);
   parts.push(`<div class="card">
@@ -500,7 +488,7 @@ function render(d) {
           const p = pct(e.position_sec, e.duration_sec);
           const done = e.completed || p >= 95;
           return `<div class="history-row ${done ? 'done' : ''}">
-            <span class="age" style="color:#5a5a65; font-size:0.8rem;">${fmtAge(e.last_updated)}</span>
+            <span class="age">${fmtAge(e.last_updated)}</span>
             <span class="name">${escapeHtml(e.name || e.path.split('/').pop())}</span>
             <span class="pct">${done ? '✓ done' : p + '%'}</span>
           </div>`;
@@ -519,28 +507,58 @@ function escapeHtml(s) {
   })[c]);
 }
 
-// Initial load.
 refresh();
 </script>
 </body>
 </html>
 """
 
+
 # ── Flask app ───────────────────────────────────────────────────────────────
 
-app = Flask(__name__)
+def make_app(local: bool) -> Flask:
+    app = Flask(__name__)
+
+    @app.route("/")
+    def index():
+        return render_template_string(DASHBOARD_HTML)
+
+    @app.route("/api/status")
+    def api_status():
+        t0 = time.monotonic()
+        if local:
+            data = collect_status()
+            data["_fetch_elapsed_ms"] = int((time.monotonic() - t0) * 1000)
+            return jsonify(data)
+        return jsonify(fetch_remote())
+
+    return app
 
 
-@app.route("/")
-def index():
-    return render_template_string(DASHBOARD_HTML)
+def main():
+    ap = argparse.ArgumentParser()
+    ap.add_argument("--local", action="store_true",
+                    help="Run on the Pi — collect data via local subprocess (not SSH)")
+    ap.add_argument("--collect", action="store_true",
+                    help="Print status JSON to stdout and exit (invoked over SSH in remote mode)")
+    args = ap.parse_args()
 
+    if args.collect:
+        print(json.dumps(collect_status()))
+        return
 
-@app.route("/api/status")
-def api_status():
-    return jsonify(fetch_status())
+    bind = os.environ.get("EASYPLAY_BIND")
+    if bind is None:
+        bind = "0.0.0.0" if args.local else "127.0.0.1"
+
+    if args.local:
+        print(f"\nEasyPlay dashboard (LOCAL): http://{bind}:{DASH_PORT}\n")
+    else:
+        print(f"\nEasyPlay dashboard (REMOTE via ssh): http://{bind}:{DASH_PORT}  →  {USER}@{HOST}\n")
+
+    app = make_app(local=args.local)
+    app.run(host=bind, port=DASH_PORT, debug=False)
 
 
 if __name__ == "__main__":
-    print(f"\nEasyPlay dashboard: http://localhost:{DASH_PORT}  →  {USER}@{HOST}\n")
-    app.run(host="127.0.0.1", port=DASH_PORT, debug=False)
+    main()
