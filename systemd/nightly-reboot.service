@@ -1,0 +1,6 @@
+[Unit]
+Description=Nightly reboot of the Pi (clears any accumulated state)
+
+[Service]
+Type=oneshot
+ExecStart=/usr/bin/systemctl reboot
